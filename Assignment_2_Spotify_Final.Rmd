@@ -1,0 +1,309 @@
+---
+title: "Assignment 2: Initial Model investigation for R Shiny Interactive Analysis"
+author: "Adam, Chieling and Victoria"
+date: "6/21/2021"
+output: 
+    prettydoc::html_pretty:
+    theme: tactile
+    highlight: github
+---
+
+## Introduction
+
+In this complementary rmd file, we show the initial investigation we have performed before finalizing the dashboard. Based on this investigation, we have selected the four variables to feed into the non-interactive classifiers in the dashboard. 
+
+This investigation has been performed with linear (Linear, Polynomial and Stepwise Regression) and non-linear models (KNN, Logistic Regression and Classification Trees) to find the most suitable model with the most significant predictors so we can predict future songs' Popularity.
+
+Based on the content of the data, this analysis aims to answer the following research question:**"Which models are useful for predicting Popularity of a song from the Spotify-2000 dataset?"** This question will be investigated using linear and non-linear models. For finding the most useful predictors Lasso methods are considered. Afterwards the most useful models are determined. These final models will be added into our Shiny App to answer our research question.
+
+
+```{r}
+df <- read.csv('./ui/Spotify-2000.csv')
+df <- df[,-1] # drop Index/ i..Index
+```
+
+### Libraries Used
+
+```{r, results='hide'}
+# For data visualization
+library(ggplot2) ## fo plotting
+library(RColorBrewer) ## for colors
+# For data wrangling
+library(dplyr) ## data manipulation
+library(corrr) ## Correlation matrix
+# Model building and evaluation:
+library(caret)#  For cross validation
+library(glmnet)# For ridge regression functions
+library(splines)# For spline models
+# Miscleaneous
+select <- dplyr::select # Encoding dplyr method into an object enabling data manipulation
+library(MASS) 
+library(tidyverse)
+```
+
+### Data inspection
+
+```{r}
+df %>% str()
+df %>% is.na() %>% sum()
+``` 
+
+As seen above, some columns need to be converted to a different data type:
+
+```{r}
+df$Length..Duration. <- df$Length..Duration. %>% as.numeric()
+df$Top.Genre <- df$Top.Genre %>% as.factor()
+```
+
+The conversion introduced missing values in the Length column. The values are inspected below:
+
+```{r}
+df %>% is.na() %>% sum()
+```
+
+```{r}
+df <- df %>% na.omit() # Missing values are omitted 
+df %>% is.na() %>% sum()# Final consistency check
+```
+
+## Model Building and comparisation:
+ 
+#### Data Labeling:
+
+```{r}
+df %>% dim() # Evaluation of the total number of rows in the dataset
+```
+
+With 1990 rows, an equal split for validation and test data is performed. 
+
+```{r}
+set.seed(123)
+splits <- c(rep('train', 995), rep('validation', 995))
+```
+
+We mutate the labels and append to our data frame.
+
+```{r}
+df <- mutate(df, splits = sample(splits))
+```
+
+With the data labeled, a mask is used to create validation and test subsets.
+
+```{r}
+df_train <- filter(df, splits == 'train')
+df_validation <- filter(df, splits =='validation')
+```
+
+Let us look at the distribution of all values depending on the chosen outcome feature (popularity):
+
+```{r}
+ggplot() +
+  geom_histogram(data = df_train, mapping = aes(x = Popularity), alpha = 0.3, colour = "Red") +
+  geom_histogram(data = df_validation, mapping = aes(x = Popularity), alpha = 0.3, colour = "Blue")
+```
+
+Data is normally distributed for both subsets, additional investigation is performed below with a correlation matrix:
+
+ 
+#### Correlation Matrix:
+
+To identify the best predictors, a correlation matrix is built below:
+
+```{r}
+# pruning of all non-numeric columns
+
+cordf <- select(df, -c(splits, Title, Year, Artist, Top.Genre))
+df_cor <- correlate(cordf, use="everything") # source: http://bwlewis.github.io/covar/missing.html
+df_cor
+```
+
+All correlations are below .6 here.
+
+
+### Shrinkage methods for linear models:
+
+The investigation starts by fitting a lasso model to the dataset, in order to do
+so, a training matrix is created.
+
+```{r}
+lasso_train <- model.matrix(Popularity ~ ., data =  select(df_train, -c(splits, Title, Year, Artist))) # The splits, Title, Year and Artist columns are omitted as they are not relevant to the model
+```
+ 
+ 
+The above-created matrix is fitted to the below-created lasso model
+
+```{r}
+lasso_fit <- glmnet(x = lasso_train[, -1], # Intercept is removed 
+              
+y = df_train$Popularity, family = "gaussian", alpha  = 1)
+
+plot(lasso_fit)
+```
+
+
+As shown above, one of the disadvantages of the Lasso model is that it challenges the interpretation when the number of variables is too large. That is because this model preforms better in a setting where a small number of predictors have substantial coefficients and the remaining predictors have coefficients that are very small or equal to zero.
+
+
+Coefficients are displayed:
+
+```{r}
+rownames(coef(lasso_fit))
+```
+
+As can be seen, the lasso model selected all potential interaction effects with 
+the genre. Cross validation is used to check if this model is useful.
+
+#### Cross validation:
+
+```{r}
+lasso_cv <- model.matrix(Popularity ~ ., bind_rows(df_train, df_validation)[, -16])[, -1] # we remove splits and the intercept
+lasso_cv_result <- cv.glmnet(x = lasso_cv, y = c(df_train$Popularity, df_validation$Popularity), nfolds = 10)
+
+print(lasso_cv_result$lambda.min) # The best lambda is retrieved
+lasso_cv_result %>% print()
+```
+
+With a lambda value of 0.22, the model produces an MSE of 123. 
+
+Now we plot:
+
+```{r}
+plot(lasso_cv_result)
+```
+
+The MSE is drastically reduced after 147 predictors, mainly because of the interaction
+effects of each of the categories in Top.Genre (many combinations are possible due to all possible categories). This hyper-parametrization is a symptom of
+overfitting. Therefore, a second lasso model is fit without Top.Genre below:
+
+
+```{r}
+# An identical lasso model to the first is created. This time, the Top.Genre feature is pruned 
+lasso_train_2 <- model.matrix(Popularity ~ ., data =  select(df_train, -c(splits, Title, Year, Artist, Top.Genre)))
+lasso_fit_2 <- glmnet(x = lasso_train_2[, -1], y = df_train$Popularity, family = "gaussian", alpha  = 1)
+# The rownames are inspected once again
+rownames(coef(lasso_fit_2))
+```
+
+As can be seen above, the model is now only using 10 features. Below, a cross-validation
+function is used to verify the error rates:
+
+```{r}
+# Instead of using all predictors as was shown in the lasso_cv_1 model, we only specify the coefficients from lasso_fit_2
+lasso_cv_2 <- model.matrix(Popularity ~ Beats.Per.Minute..BPM. + Energy + Danceability + Loudness..dB.+Liveness+ Valence+Length..Duration. + Acousticness + Speechiness, bind_rows(df_train, df_validation)[, -16])[, -1] # we remove 'splits' and the intercept
+lasso_cv_result_2 <- cv.glmnet(x = lasso_cv_2, y = c(df_train$Popularity, df_validation$Popularity), nfolds = 10)
+print(lasso_cv_result_2$lambda.min) # The best lambda is retrieved
+lasso_cv_result_2 %>% print()
+```
+
+With a lambda value of 0.05, the model produces a higher MSE of 194. 
+
+```{r}
+plot(lasso_cv_result_2)
+```
+
+As can be seen above, five variables are sufficient to minimize most of the reducible error.
+
+```{r}
+#MSE function
+mse <- function(y_true, y_pred) {
+  mean((y_true - y_pred)^2)
+}
+```
+
+First, the outcome of the lasso model is translated into a linear model.
+
+```{r}
+lin_fit <- lm(Popularity ~ Beats.Per.Minute..BPM.+ Energy + Danceability + Loudness..dB. + Liveness + Valence + Length..Duration.+ Acousticness + Speechiness, data =  select(df_train, -c(splits, Title, Year, Artist, Top.Genre))) # Linear model is created 
+lin_fit %>%  summary() # Linear model is viewed 
+```
+Only Loudness and Liveness show some statistical significance, however, both R-squared and Adjusted R-squared indicate that this model has poor correlational affordances.
+
+It seems multiple predictors are insignificant, what if the insignificant predictors are pruned?
+
+```{r}
+lin_fit_2 <- lm(Popularity~  Danceability + Loudness..dB. + Liveness + Speechiness, data =  select(df_train, -c(splits, Title, Year, Artist, Top.Genre))) # Linear model is created 
+lin_fit_2 %>%  summary()
+mse(df_train$Popularity, predict(lin_fit_2)) # we return the mse for the model 
+```
+
+Even while all the predictors are significant and the MSE is slightly reduced compared to the Lasso model, the R squared is still critically low, moreover, the overall model is predicting poorly with the low F-statistic value.
+
+With the reduced amount of predictors, the predictors are elevated to a higher
+dimension using higher degree polynomials.
+
+
+### Higher order models
+
+We left out 'Speechiness' from this High order model as it is advised against elevating higher than a fourth degree.
+
+```{r}
+fit_higher <- lm(Popularity ~ I(Danceability^2) + I(Loudness..dB.^3) + I(Liveness^4), data = df_train)
+fit_higher %>% summary
+mse(df_train$Popularity, predict(fit_higher)) # we return the mse for the model 
+```
+
+This model is slightly worse with an increased error score, the investigation
+is continued with the polynomial regression.
+
+
+### Polynomial models
+
+A fourth degree polynomial is created below.
+
+```{r}
+fit_poly <- lm(Popularity ~ poly(Danceability + Loudness..dB. + Liveness + Speechiness, 4, raw = TRUE), data = select(df_train, -c(splits, Title, Year, Artist, Top.Genre)))
+fit_poly %>% summary()
+mse(df_train$Popularity, predict(fit_poly))
+```
+
+A fourth degree polynomial harms the model more than it helps.
+
+### Piecewise models:
+
+A piecewise model is created using quantiles:
+
+```{r}
+fit_piece <- lm(Popularity ~ cut(Danceability + Loudness..dB.+ Liveness, quantile(Popularity)), data = select(df_train, -c(splits, Title, Year, Artist, Top.Genre)))
+fit_piece %>% summary()
+mse(df_train$Popularity, predict(fit_piece))
+```
+
+As can be seen here, once again a higher MSE is achieved.
+
+### Polynomial splines:
+
+The below is a cubic spline of the model using the median for knotting.
+
+```{r}
+fit_spline <- lm(Popularity ~ bs(Danceability + Loudness..dB.+ Liveness + Speechiness, knots = median(Popularity)), data = select(df_train, -c(splits, Title, Year, Artist, Top.Genre)))
+fit_spline %>% summary()
+mse(df_train$Popularity, predict(fit_spline))
+```
+
+Lower MSE than previous model but still an insufficient R-squared and Adjusted R-squared.
+
+### Natural Spline:
+
+```{r}
+fit_spline_natural <- lm(Popularity ~ ns(Danceability + Loudness..dB. + Liveness + Speechiness, df = 4), data = select(df_train, -c(splits, Title, Year, Artist, Top.Genre)))
+fit_spline_natural %>% summary()
+mse(df_train$Popularity, predict(fit_spline_natural))
+```
+
+Once again slightly Lower MSE than in the previous model, the results are still unsatisfactory.
+
+
+## Conclusion
+
+We conclude that linear models (Linear Regression, Polynomial, Piecewise Models) are not suitable for predicting future songs' popularity. Therefore, a classification approach has potential in predicting popularity after transforming the outcome variable into a categorical variable (popular/not popular).
+
+Nonetheless, this analysis was useful in finding the best variables to include in our classification models. The variables are 'Danceability', 'Loudness..dB.',  'Liveness', and within the pale of reason: 'Speechiness'. Therefore, with linear and polynomial models covered in this .Rmd file, additional investigation on classification is performed in the interactive Shiny App to predict popularity. 
+ 
+ 
+
+## References
+
+Kaggle, Paul Lamere. (2019). Spotify_2000. [Spotify-2000.csv]. Retrieved from https://www.kaggle.com/iamsumat/spotify-top-2000s-mega-dataset.
+
+James, G., Witten, D., Hastie, T., & Tibshirani, R. (2017). An introduction to statistical learning: With applications in R.(7th printing). New York Heidelberg Dordrecht London Springer.
+
